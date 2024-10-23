@@ -19,10 +19,7 @@ import { Boom } from '@hapi/boom';
 import fs from 'fs';
 import os from 'os';
 import { exec } from 'child_process';
-import url from 'url';
 import path from 'path';
-import chalk from 'chalk';
-import util from 'util';
 
 import treeKill from './lib/tree-kill.js';
 import serialize, { Client } from './lib/serialize.js';
@@ -38,40 +35,32 @@ if (process.env.WRITE_STORE === 'true') store.readFromFile(`./${process.env.SESS
 const pathContacts = `./${process.env.SESSION_NAME}/contacts.json`;
 const pathMetadata = `./${process.env.SESSION_NAME}/groupMetadata.json`;
 
-// Define commands structure
 const commands = {
     'all:commands': new Map(),
     'prefix:true': new Map(),
     'prefix:false': new Map()
 };
 
-// Load plugins
-await Promise.all(fs.readdirSync('./plugins/').filter(file => file.endsWith('.js')).map(file => 
-    import(url.pathToFileURL(path.resolve(`./plugins/${file}`))).then(plugin => { 
-        if (plugin.default.usePrefix === false) { 
-            commands['prefix:false'].set(file, plugin.default); 
-        } else { 
-            commands['prefix:true'].set(file, plugin.default); 
-        } 
-        commands['all:commands'].set(file, plugin.default); 
-    }).catch(error => { 
-        console.log(chalk.bgRed('[ ERROR ]'), chalk.redBright.bold(`${file}:`), util.format(error)); 
-    })
-));
+// Memuat plugin
+const loadPlugins = async () => {
+    const pluginDir = path.resolve('./plugins');
+    const files = fs.readdirSync(pluginDir).filter(file => file.endsWith('.js'));
 
-// Get plugin function
-commands.get = async (command = false, type = 'all:commands') => { 
-    let numero = 0; 
-    return await new Promise(async (resolve, reject) => { 
-        try { 
-            await commands[type].forEach(async (plugin) => { 
-                numero += 1;
-                plugin?.command?.find(o => o == command) ? resolve(plugin) : numero >= await commands[type].size ? resolve(false) : null; 
-            });
-        } catch (e) { 
-            return reject(e); 
-        } 
-    });
+    for (const file of files) {
+        try {
+            const plugin = await import(path.join(pluginDir, file));
+            if (plugin.default) {
+                if (plugin.default.usePrefix === false) {
+                    commands['prefix:false'].set(file, plugin.default);
+                } else {
+                    commands['prefix:true'].set(file, plugin.default);
+                }
+                commands['all:commands'].set(file, plugin.default);
+            }
+        } catch (error) {
+            console.error(`Error loading plugin ${file}:`, error);
+        }
+    }
 };
 
 const startSock = async () => {
@@ -106,7 +95,7 @@ const startSock = async () => {
             } catch (error) {
                 console.error('Error sending reaction:', error);
             }
-            await delay(1000); 
+            await delay(1000);
         }
     };
 
@@ -144,10 +133,11 @@ const startSock = async () => {
     store.bind(hisoka.ev);
     await Client({ hisoka, store });
 
+    await loadPlugins(); // Muat plugin di sini
+
     // login dengan pairing
     if (usePairingCode && !hisoka.authState.creds.registered) {
         let phoneNumber = usePairingCode.replace(/[^0-9]/g, '');
-
         if (!Object.keys(PHONENUMBER_MCC).some(v => phoneNumber.startsWith(v))) throw "Start with your country's WhatsApp code, Example : 62xxx";
 
         await delay(3000);
@@ -196,6 +186,7 @@ const startSock = async () => {
     } else {
         fs.writeFileSync(pathContacts, JSON.stringify({}));
     }
+    
     // group metadata
     if (fs.existsSync(pathMetadata)) {
         store.groupMetadata = JSON.parse(fs.readFileSync(pathMetadata, 'utf-8'));
@@ -298,10 +289,19 @@ const startSock = async () => {
             }
         }
 
-        // status sendiri atau publik
+        // status self atau publik
         if (process.env.SELF === 'true' && !m.isOwner) return;
 
-        // untuk kasus
+        // untuk menambahkan fungsi perintah dari plugin
+        if (m.prefix && m.body.startsWith(m.prefix)) { // Menggunakan m.prefix
+            const command = m.body.substring(m.prefix.length).trim().split(' ')[0].toLowerCase();
+            const cmd = await hisoka.getCommand(command);
+            
+            if (cmd) {
+                await cmd.script(m, { hisoka, store });
+            }
+        }
+
         await (await import(`./message.js?v=${Date.now()}`)).default(hisoka, store, m);
     });
 
@@ -315,7 +315,6 @@ const startSock = async () => {
 
         // untuk auto restart ketika RAM sisa 300MB
         const memoryUsage = os.totalmem() - os.freemem();
-
         if (memoryUsage > os.totalmem() - parseFileSize(process.env.AUTO_RESTART, false)) {
             await hisoka.sendMessage(jidNormalizedUser(hisoka.user.id), { text: `penggunaan RAM mencapai *${formatSize(memoryUsage)}* waktunya merestart...` }, { ephemeralExpiration: 24 * 60 * 60 * 1000 });
             exec('npm run restart:pm2', err => {

@@ -129,6 +129,15 @@ const startSock = async () => {
             return !!msg.syncType;
         },
     });
+    
+    hisoka.getCommand = async (command) => {
+    for (const plugin of commands['all:commands'].values()) {
+        if (plugin.command && plugin.command.includes(command)) {
+            return plugin;
+        }
+    }
+    return null;
+    };
 
     store.bind(hisoka.ev);
     await Client({ hisoka, store });

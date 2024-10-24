@@ -1,3 +1,5 @@
+import axios from 'axios';
+
 const command = {
     command: ['tiktok'],
     category: ['download']
